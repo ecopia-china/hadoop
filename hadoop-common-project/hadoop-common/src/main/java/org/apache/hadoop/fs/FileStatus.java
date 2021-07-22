@@ -48,7 +48,7 @@ public class FileStatus implements Writable, Comparable<Object>,
   private Boolean isdir;
   private short block_replication;
   private long blocksize;
-  private long modification_time;
+  private long modificationtime;
   private long access_time;
   private FsPermission permission;
   private String owner;

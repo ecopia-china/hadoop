@@ -28,13 +28,12 @@ public class Attr {
   public boolean full;
   public long ecopiauid;
 
-  public FileStatus toFileStatus(Path p, String username) {
-    return new FileStatus(length, type.equals(TYPE_DIRECTORY),
-        DEFAULT_REPLICAS, 0,
-        mtime * 1000 + mtimensec/1000000,
-        atime * 1000 + atimensec / 1000000,
-        new FsPermission(mode),
-        username, username, p);
+  public long modification_time() {
+    return mtime * 1000 + mtimensec/1000000;
+  }
+
+  public long access_time() {
+    return atime * 1000 + atimensec / 1000000;
   }
 
   @Override

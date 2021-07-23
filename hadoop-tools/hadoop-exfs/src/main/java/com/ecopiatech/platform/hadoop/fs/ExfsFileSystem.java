@@ -14,6 +14,8 @@ import org.apache.hadoop.util.Progressable;
 
 import java.io.*;
 import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
@@ -25,11 +27,14 @@ import org.slf4j.LoggerFactory;
 import static org.apache.hadoop.fs.s3a.S3AUtils.*;
 
 public class ExfsFileSystem extends FileSystem {
+  public ExfsFileSystem() {
+    s3fs = new S3AFileSystem();
+  }
   public static class ListDir_return extends Structure {
     public static class ByValue extends ListDir_return implements Structure.ByValue {
     }
     public Pointer r0;
-    public long r1;
+    public int r1;
     protected List<String> getFieldOrder() {
       return Arrays.asList("r0", "r1");
     }
@@ -50,10 +55,16 @@ public class ExfsFileSystem extends FileSystem {
     int InitExfs(String redisURL);
     FileStat_return.ByValue FileStat(String path);
     ListDir_return.ByValue ListDir(String path, String contain);
+    int CreateDirAll(String path, int permission);
+    int MoveEntry(String src, String dst);
+    int DeleteDir(String path);
+    int DeleteFile(String path);
+    int CreateObjFile(String path, String objectPath, String objectETag,
+                      long length, boolean isShared, int mode);
   }
 
   private LibExfs libexfs;
-  private S3AFileSystem s3fs;
+  final private S3AFileSystem s3fs;
 
   private URI uri;
   private Path workingDir;
@@ -99,6 +110,7 @@ public class ExfsFileSystem extends FileSystem {
     uri = name;
     workingDir = new Path("/");
     username = UserGroupInformation.getCurrentUser().getShortUserName();
+    s3fs.initialize(URI.create("s3a://ecopia-platform"), conf);
   }
   /**
    * Return the protocol scheme for the FileSystem.
@@ -226,7 +238,8 @@ public class ExfsFileSystem extends FileSystem {
   public FSDataInputStream open(Path f, int bufferSize)
       throws IOException {
     LOG.debug("open file: " + f);
-    return null;
+    ExfsFileStatus s = getFileStatusInternal(f);
+    return s3fs.open(toS3APath(s.getDataPath()), bufferSize);
   }
 
   /**
@@ -251,7 +264,40 @@ public class ExfsFileSystem extends FileSystem {
                                    boolean overwrite, int bufferSize, short replication, long blockSize,
                                    Progressable progress) throws IOException {
     LOG.debug("create file: " + f);
-    return null;
+    boolean exists;
+    ExfsFileStatus s = null;
+    try {
+      s = getFileStatusInternal(f);
+      exists = s != null;
+    } catch (FileNotFoundException e) {
+      exists = false;
+    }
+
+    if (exists && !overwrite) {
+      throw new FileAlreadyExistsException(f + " already exist");
+    } else if (exists && s.isDirectory()) {
+      throw new FileAlreadyExistsException(f + " is a direcotry");
+    } else if (exists && overwrite) {
+      // Delete origin file
+      if (!delete(f, false)) {
+        LOG.error("delete previous file error: " + f);
+      }
+    }
+
+    // Create in s3 fs
+    // TODO check s3 repeat name
+    URI s3uri = toS3URI(f);
+    FSDataOutputStream output = s3fs.create(
+        toS3APath(s3uri), permission, overwrite, bufferSize, replication, blockSize, progress);
+
+    // Create in meta
+    int ret = libexfs.CreateObjFile(
+        toExfsPath(f), s3uri.toString(), "", 0, false, permission.toShort());
+    if (ret != 0) {
+      throw new IOException("create file " + f + " error");
+    }
+
+    return output;
   }
 
   /**
@@ -278,7 +324,11 @@ public class ExfsFileSystem extends FileSystem {
    */
   public boolean rename(Path src, Path dst) throws IOException {
     LOG.debug("rename file, from "+ src +" to " + dst);
-    return false;
+    int ret = libexfs.MoveEntry(toExfsPath(src), toExfsPath(dst));
+    if (ret != 0) {
+      throw new IOException(Errno.toString(ret));
+    }
+    return true;
   }
 
   /**
@@ -297,7 +347,93 @@ public class ExfsFileSystem extends FileSystem {
   @Retries.RetryTranslated
   public boolean delete(Path f, boolean recursive) throws IOException {
     LOG.debug("delete file: " + f);
-    return false;
+    ExfsFileStatus s;
+    try {
+      s = getFileStatusInternal(f);
+    } catch (FileNotFoundException e) {
+      return false;
+    }
+    if (s.isDirectory()) {
+      if (recursive) {
+        deleteRecursive(f);
+      } else {
+        int ret = libexfs.DeleteDir(toExfsPath(f));
+        if (ret != 0) {
+          throw new IOException(Errno.toString(ret));
+        }
+      }
+    } else if (s.isFile()) {
+      int ret = libexfs.DeleteFile(toExfsPath(f));
+      if (ret != 0) {
+        throw new IOException(Errno.toString(ret));
+      }
+      if (!deleteS3Object(s.getDataPath())) {
+        LOG.error("delete object error: " + s);
+      }
+    }
+    return true;
+  }
+
+  private boolean deleteRecursive(Path f) throws IOException {
+    ExfsFileStatus[] ss = listStatusInternal(f);
+    LOG.debug("dir: " + f + " entry size: " + ss.length);
+    for (ExfsFileStatus s : ss) {
+      if (s.isDirectory()) {
+        LOG.debug("delete dir recursive: " + s.getPath());
+        deleteRecursive(s.getPath());
+      } else {
+        LOG.debug("delete file: " + s.getPath());
+        int ret = libexfs.DeleteFile(toExfsPath(s.getPath()));
+        if (ret != 0) {
+          throw new IOException(Errno.toString(ret));
+        }
+        if (!deleteS3Object(s.getDataPath())) {
+          LOG.error("delete object error: " + s);
+        }
+      }
+    }
+    LOG.debug("delete dir: " + f);
+    int ret = libexfs.DeleteDir(toExfsPath(f));
+    if (ret != 0) {
+      throw new IOException(Errno.toString(ret));
+    }
+    return true;
+  }
+
+  private boolean deleteS3Object(URI s3uri) {
+    try {
+      s3fs.delete(toS3APath(s3uri), false);
+    } catch (Exception e) {
+      LOG.error("delete s3 object error: " + e);
+      return false;
+    }
+    return true;
+  }
+
+  private Path toS3APath(URI s3uri) {
+    URI s3auri;
+    try {
+      s3auri = new URI(
+        "s3a", s3uri.getHost(), s3uri.getPath(), s3uri.getFragment()
+      );
+    } catch (URISyntaxException e) {
+      LOG.error("parse uri error: " + e);
+      return null;
+    }
+    return new Path(s3auri);
+  }
+
+  private URI toS3URI(Path exfs) {
+    URI u = exfs.toUri();
+    URI s3uri = null;
+    try {
+      s3uri = new URI(
+          "s3", "ecopia-platform/"+u.getHost(), u.getPath(), u.getFragment()
+      );
+    } catch (URISyntaxException e) {
+      LOG.error("parse uri error: " + e);
+    }
+    return s3uri;
   }
 
   /**
@@ -309,24 +445,30 @@ public class ExfsFileSystem extends FileSystem {
    * @throws FileNotFoundException when the path does not exist;
    *         IOException see specific implementation
    */
-  public FileStatus[] listStatus(Path f) throws
-      IOException {
+  public FileStatus[] listStatus(Path f) throws IOException {
+    return listStatusInternal(f);
+  }
+
+  public ExfsFileStatus[] listStatusInternal(Path f) throws IOException {
     LOG.debug("list status: " + f);
     Pointer ptr = null;
     try {
       ListDir_return.ByValue ret = libexfs.ListDir(toExfsPath(f), "");
       if (ret.r1 != 0) {
-        throw new IOException("listStatus error");
+        throw new IOException(Errno.toString(ret.r1));
       }
       ptr = ret.r0;
       String j = ptr.getString(0, "utf8");
       List<Entry> entries = JSON.parseArray(j, Entry.class);
-      FileStatus[] status = new FileStatus[entries.size()];
-      for (int i = 0; i < entries.size(); i++) {
-        Entry e = entries.get(i);
-        status[i] = e.attr.toFileStatus(new Path(f, e.name), username);
+      List<ExfsFileStatus> status = new ArrayList<>();
+      for (Entry e : entries) {
+        if (e.name.equals(".") || e.name.equals("..")) {
+          continue;
+        }
+        status.add(new ExfsFileStatus(e.attr, new Path(f, e.name), username));
       }
-      return status;
+      ExfsFileStatus[] output = new ExfsFileStatus[status.size()];
+      return status.toArray(output);
     } finally {
       if (ptr != null) {
         Native.free(Pointer.nativeValue(ptr));
@@ -367,7 +509,13 @@ public class ExfsFileSystem extends FileSystem {
   public boolean mkdirs(Path path, FsPermission permission)
       throws IOException, FileAlreadyExistsException {
     LOG.debug("mkdirs: " + path);
-    return false;
+    int ret = libexfs.CreateDirAll(toExfsPath(path), permission.toShort());
+    if (ret == 17 /* EEXIST 17 File exists */) {
+      throw new FileAlreadyExistsException(path + " already exist");
+    } else if (ret != 0) {
+      throw new IOException(Errno.toString(ret));
+    }
+    return true;
   }
 
   /**
@@ -379,22 +527,28 @@ public class ExfsFileSystem extends FileSystem {
    */
   @Retries.RetryTranslated
   public FileStatus getFileStatus(final Path f) throws IOException {
+    return getFileStatusInternal(f);
+  }
+
+  private ExfsFileStatus getFileStatusInternal(final Path f) throws IOException {
     LOG.debug("get file status: " + f);
     Pointer ptr0 = null;
     Pointer ptr1 = null;
     try {
       FileStat_return ret = libexfs.FileStat(toExfsPath(f));
-      if (ret.r2 == 2) {
-        throw new FileNotFoundException();
+      if (ret.r2 == 2 /* ENOENT 2 No such file or directory */) {
+        throw new FileNotFoundException(f + " not exist");
       } else if (ret.r2 != 0) {
-        throw new IOException("Get file stat error");
+        throw new IOException(Errno.toString(ret.r2));
       }
       ptr0 = ret.r0;
       ptr1 = ret.r1;
       String j = ptr0.getString(0);
+      String j1 = ptr1.getString(0);
       Attr attr = JSON.parseObject(j, Attr.class);
-      FileStatus s = attr.toFileStatus(f, username);
-      LOG.debug("get file status res: " + s + " attr: " + attr);
+      FileData data = JSON.parseObject(j1, FileData.class);
+      ExfsFileStatus s = new ExfsFileStatus(attr, data, f, username);
+      LOG.debug("get file status res: " + s + " attr: " + attr + " data: " + data);
       return s;
     } finally {
       if (ptr0 != null) {

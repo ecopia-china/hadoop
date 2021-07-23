@@ -1,11 +1,18 @@
 package com.ecopiatech.platform.hadoop.fs;
 
 public class FileData {
-  private String type;
-  private String data_path;
-  private String etag;
-  private long length;
-  private boolean shared;
+  public static String DATATYPE_OBJECT = "object";
+  public static String DATATYPE_PROJECT = "project";
+  public static String DATATYPE_LAYER = "layer";
+  public static String DATATYPE_RASTER = "raster";
+  public static String DATATYPE_DRASTER = "draster";
+  public static String DATATYPE_DDLINK = "ddlink";
+
+  public String type;
+  public String data_path;
+  public String etag;
+  public long length;
+  public boolean shared;
 
   @Override
   public String toString() {

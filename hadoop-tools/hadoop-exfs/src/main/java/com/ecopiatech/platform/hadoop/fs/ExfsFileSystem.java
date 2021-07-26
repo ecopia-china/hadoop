@@ -1,5 +1,6 @@
 package com.ecopiatech.platform.hadoop.fs;
 
+import com.google.common.util.concurrent.ListeningExecutorService;
 import com.sun.jna.Library;
 import com.sun.jna.Native;
 import com.sun.jna.Pointer;
@@ -8,8 +9,12 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.*;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.s3a.*;
+import org.apache.hadoop.fs.s3a.commit.CommitConstants;
+import org.apache.hadoop.fs.s3a.commit.MagicCommitIntegration;
+import org.apache.hadoop.fs.s3a.commit.PutTracker;
 import org.apache.hadoop.fs.store.EtagChecksum;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.util.BlockingThreadPoolExecutorService;
 import org.apache.hadoop.util.Progressable;
 
 import java.io.*;
@@ -19,12 +24,15 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import com.alibaba.fastjson.*;
+import org.apache.hadoop.util.SemaphoredDelegatingExecutor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static org.apache.hadoop.fs.s3a.S3AUtils.*;
+import static org.apache.hadoop.fs.s3a.Constants.*;
+import static com.ecopiatech.platform.hadoop.fs.ExfsUtils.*;
 
 public class ExfsFileSystem extends FileSystem {
   public ExfsFileSystem() {
@@ -72,6 +80,15 @@ public class ExfsFileSystem extends FileSystem {
 
   public static final Logger LOG = LoggerFactory.getLogger(ExfsFileSystem.class);
 
+  private long partSize;
+  private String blockOutputBuffer;
+  private ExfsDataBlocks.BlockFactory blockFactory;
+  private int blockOutputActiveBlocks;
+  private ListeningExecutorService boundedThreadPool;
+  private ExfsInstrumentation instrumentation;
+  private MagicCommitIntegration committerIntegration;
+  private LocalDirAllocator directoryAllocator;
+
   /** Called after a new FileSystem instance is constructed.
    * @param name a uri whose authority section names the host, port, etc.
    *   for this FileSystem
@@ -94,23 +111,64 @@ public class ExfsFileSystem extends FileSystem {
     os.close();
     file.deleteOnExit();
 
-    libexfs = Native.load(file.getAbsolutePath(), LibExfs.class);
-    if (libexfs == null) {
-      throw new IOException("Exfs initialized failed for exfs://" + name);
-    }
+    try {
+      libexfs = Native.load(file.getAbsolutePath(), LibExfs.class);
+      if (libexfs == null) {
+        throw new IOException("Exfs initialized failed for exfs://" + name);
+      }
 
-    String redis_url = conf.get("fs.exfs.redis.url", "");
-    if (redis_url.equals("")) {
-      throw new IOException("fs.exfs.redis.url is required");
+      String redis_url = conf.get("fs.exfs.redis.url", "");
+      if (redis_url.equals("")) {
+        throw new IOException("fs.exfs.redis.url is required");
+      }
+      int ret = libexfs.InitExfs(redis_url);
+      if (ret != 0) {
+        throw new IOException("Exfs initialized failed for exfs://" + name);
+      }
+      s3fs.initialize(URI.create("s3a://ecopia-platform"), conf);
+      uri = name;
+      workingDir = new Path("/");
+      username = UserGroupInformation.getCurrentUser().getShortUserName();
+      blockOutputActiveBlocks = intOption(conf,
+          FAST_UPLOAD_ACTIVE_BLOCKS, DEFAULT_FAST_UPLOAD_ACTIVE_BLOCKS, 1);
+      instrumentation = new ExfsInstrumentation(name);
+      int maxThreads = conf.getInt(MAX_THREADS, DEFAULT_MAX_THREADS);
+      if (maxThreads < 2) {
+        LOG.warn(MAX_THREADS + " must be at least 2: forcing to 2.");
+        maxThreads = 2;
+      }
+      int totalTasks = intOption(conf,
+          MAX_TOTAL_TASKS, DEFAULT_MAX_TOTAL_TASKS, 1);
+      long keepAliveTime = longOption(conf, KEEPALIVE_TIME,
+          DEFAULT_KEEPALIVE_TIME, 0);
+      boundedThreadPool = BlockingThreadPoolExecutorService.newInstance(
+          maxThreads,
+          maxThreads + totalTasks,
+          keepAliveTime, TimeUnit.SECONDS,
+          "s3a-transfer-shared");
+      boolean magicCommitterEnabled = conf.getBoolean(
+          CommitConstants.MAGIC_COMMITTER_ENABLED,
+          CommitConstants.DEFAULT_MAGIC_COMMITTER_ENABLED);
+      LOG.debug("Filesystem support for magic committers {} enabled",
+          magicCommitterEnabled ? "is" : "is not");
+      committerIntegration = new MagicCommitIntegration(
+          s3fs, magicCommitterEnabled);
+
+      partSize = getMultipartSizeProperty(conf,
+          MULTIPART_SIZE, DEFAULT_MULTIPART_SIZE);
+      blockOutputBuffer = conf.getTrimmed(FAST_UPLOAD_BUFFER,
+          DEFAULT_FAST_UPLOAD_BUFFER);
+      partSize = ensureOutputParameterInRange(MULTIPART_SIZE, partSize);
+      blockFactory = ExfsDataBlocks.createFactory(this, blockOutputBuffer);
+      blockOutputActiveBlocks = intOption(conf,
+          FAST_UPLOAD_ACTIVE_BLOCKS, DEFAULT_FAST_UPLOAD_ACTIVE_BLOCKS, 1);
+      LOG.debug("Using S3ABlockOutputStream with buffer = {}; block={};" +
+              " queue limit={}",
+          blockOutputBuffer, partSize, blockOutputActiveBlocks);
+
+    } catch (Exception e) {
+      throw new IOException("initializing " + new Path(name) + ", " + e);
     }
-    int ret = libexfs.InitExfs(redis_url);
-    if (ret != 0) {
-      throw new IOException("Exfs initialized failed for exfs://" + name);
-    }
-    uri = name;
-    workingDir = new Path("/");
-    username = UserGroupInformation.getCurrentUser().getShortUserName();
-    s3fs.initialize(URI.create("s3a://ecopia-platform"), conf);
   }
   /**
    * Return the protocol scheme for the FileSystem.
@@ -287,17 +345,60 @@ public class ExfsFileSystem extends FileSystem {
     // Create in s3 fs
     // TODO check s3 repeat name
     URI s3uri = toS3URI(f);
-    FSDataOutputStream output = s3fs.create(
-        toS3APath(s3uri), permission, overwrite, bufferSize, replication, blockSize, progress);
+    Path path = toS3APath(s3uri);
+    String key = s3fs.pathToKey(path);
+    instrumentation.fileCreated();
+    PutTracker putTracker =
+        committerIntegration.createTracker(path, key);
+    String destKey = putTracker.getDestKey();
+    return new FSDataOutputStream(
+        new ExfsBlockOutputStream(this,
+            destKey,
+            new SemaphoredDelegatingExecutor(boundedThreadPool,
+                blockOutputActiveBlocks, true),
+            progress,
+            partSize,
+            blockFactory,
+            instrumentation.newOutputStreamStatistics(statistics),
+            s3fs.getWriteOperationHelper(),
+            putTracker),
+        null);
+  }
 
-    // Create in meta
-    int ret = libexfs.CreateObjFile(
-        toExfsPath(f), s3uri.toString(), "", 0, false, permission.toShort());
-    if (ret != 0) {
-      throw new IOException("create file " + f + " error");
+  /**
+   * Increment a statistic by 1.
+   * This increments both the instrumentation and storage statistics.
+   * @param statistic The operation to increment
+   */
+  protected void incrementStatistic(Statistic statistic) {
+  }
+
+  /**
+   * Increment the write operation counter.
+   * This is somewhat inaccurate, as it appears to be invoked more
+   * often than needed in progress callbacks.
+   */
+  public void incrementWriteOperations() {
+    statistics.incrementWriteOps(1);
+  }
+
+  /**
+   * Demand create the directory allocator, then create a temporary file.
+   * {@link LocalDirAllocator#createTmpFileForWrite(String, long, Configuration)}.
+   *  @param pathStr prefix for the temporary file
+   *  @param size the size of the file that is going to be written
+   *  @param conf the Configuration object
+   *  @return a unique temporary file
+   *  @throws IOException IO problems
+   */
+  synchronized File createTmpFileForWrite(String pathStr, long size,
+                                          Configuration conf) throws IOException {
+    if (directoryAllocator == null) {
+      String bufferDir = conf.get(BUFFER_DIR) != null
+          ? BUFFER_DIR : HADOOP_TMP_DIR;
+      directoryAllocator = new LocalDirAllocator(bufferDir);
     }
-
-    return output;
+    return directoryAllocator.createTmpFileForWrite(pathStr, size, conf);
   }
 
   /**

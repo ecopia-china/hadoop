@@ -353,6 +353,7 @@ public class ExfsFileSystem extends FileSystem {
     String destKey = putTracker.getDestKey();
     return new FSDataOutputStream(
         new ExfsBlockOutputStream(this,
+            new ExfsFileCreator(libexfs, toExfsPath(f), s3uri.toString(), 0664),
             destKey,
             new SemaphoredDelegatingExecutor(boundedThreadPool,
                 blockOutputActiveBlocks, true),

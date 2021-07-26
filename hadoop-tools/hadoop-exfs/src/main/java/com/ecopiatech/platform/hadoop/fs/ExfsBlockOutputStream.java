@@ -42,8 +42,6 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import org.apache.hadoop.fs.s3a.Constants;
-import org.apache.hadoop.fs.s3a.S3AFileSystem;
-import org.apache.hadoop.fs.s3a.S3AInstrumentation;
 import org.apache.hadoop.fs.s3a.WriteOperationHelper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -77,6 +75,9 @@ class ExfsBlockOutputStream extends OutputStream implements
 
   /** Owner FileSystem. */
   private final ExfsFileSystem fs;
+
+  /** Create exfs file in meta */
+  private ExfsFileCreator exfsFileCreator;
 
   /** Object being uploaded. */
   private final String key;
@@ -125,7 +126,7 @@ class ExfsBlockOutputStream extends OutputStream implements
   private final PutTracker putTracker;
 
   /**
-   * An S3A output stream which uploads partitions in a separate pool of
+   * An Exfs output stream which uploads partitions in a separate pool of
    * threads; different {@link ExfsDataBlocks.BlockFactory}
    * instances can control where data is buffered.
    *
@@ -144,6 +145,7 @@ class ExfsBlockOutputStream extends OutputStream implements
    * @throws IOException on any problem
    */
   ExfsBlockOutputStream(ExfsFileSystem fs,
+      ExfsFileCreator creater,
       String key,
       ExecutorService executorService,
       Progressable progress,
@@ -154,6 +156,7 @@ class ExfsBlockOutputStream extends OutputStream implements
       PutTracker putTracker)
       throws IOException {
     this.fs = fs;
+    this.exfsFileCreator = creater;
     this.key = key;
     this.blockFactory = blockFactory;
     this.blockSize = (int) blockSize;
@@ -407,6 +410,7 @@ class ExfsBlockOutputStream extends OutputStream implements
     }
     // Note end of write. This does not change the state of the remote FS.
     writeOperationHelper.writeSuccessful(bytes);
+    exfsFileCreator.create(bytes);
   }
 
   /**

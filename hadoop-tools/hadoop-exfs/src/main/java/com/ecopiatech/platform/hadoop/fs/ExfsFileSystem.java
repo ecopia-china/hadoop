@@ -272,6 +272,11 @@ public class ExfsFileSystem extends FileSystem {
       }
     }
 
+    try {
+      mkdirs(f.getParent(), FsPermission.getDirDefault());
+    } catch (FileAlreadyExistsException e) {
+    }
+
     // Create in s3 fs
     // TODO check s3 repeat name
     URI s3uri = toS3URI(f);
@@ -283,7 +288,7 @@ public class ExfsFileSystem extends FileSystem {
     String destKey = putTracker.getDestKey();
     return new FSDataOutputStream(
         new ExfsBlockOutputStream(this,
-            new ExfsFileCreator(libexfs, toExfsPath(f), s3uri.toString(), 0664),
+            new ExfsFileCreator(libexfs, toExfsPath(f), s3uri.toString()),
             destKey,
             new SemaphoredDelegatingExecutor(boundedThreadPool,
                 blockOutputActiveBlocks, true),
@@ -414,13 +419,14 @@ public class ExfsFileSystem extends FileSystem {
         LOG.debug("Delete dir recursive: " + s.getPath());
         deleteRecursive(s.getPath());
       } else {
-        LOG.debug("Delete file: " + s.getPath());
-        int ret = libexfs.DeleteFile(toExfsPath(s.getPath()));
+        ExfsFileStatus fs = getFileStatusInternal(s.getPath());
+        LOG.debug("Delete file: " + fs.getPath());
+        int ret = libexfs.DeleteFile(toExfsPath(fs.getPath()));
         if (ret != 0) {
-          throw new IOException(Errno.toString(ret));
+          throw new IOException(Errno.toString(ret) + "(" + fs.getPath() + ")");
         }
-        if (!deleteS3Object(s.getDataPath())) {
-          LOG.error("Delete object error: " + s);
+        if (!deleteS3Object(fs.getDataPath())) {
+          LOG.error("Delete object error: " + fs);
         }
       }
     }

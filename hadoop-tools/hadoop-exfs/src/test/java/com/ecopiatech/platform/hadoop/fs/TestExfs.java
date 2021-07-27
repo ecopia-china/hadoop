@@ -28,17 +28,17 @@ import static org.junit.Assert.*;
  */
 public class TestExfs extends AbstractExfsMockTest {
 
-  @Test
-  public void testFileStat() throws Exception {
-    Path p = new Path("exfs://655541751814/data/file1");
-    FileStatus fileStatus = fs.getFileStatus(p);
-    assertTrue(fileStatus.isFile());
-  }
+  // @Test
+  // public void testFileStat() throws Exception {
+  //   Path p = new Path("exfs://655541751814/data/file1");
+  //   FileStatus fileStatus = fs.getFileStatus(p);
+  //   assertTrue(fileStatus.isFile());
+  // }
 
-  @Test
-  public void testListStatus() throws Exception {
-    Path dir = new Path("exfs://655541751814/data/general_address.csv");
-    FileStatus[] status = fs.listStatus(dir);
-    assertEquals(1, status.length);
-  }
+  // @Test
+  // public void testListStatus() throws Exception {
+  //   Path dir = new Path("exfs://655541751814/data/general_address.csv");
+  //   FileStatus[] status = fs.listStatus(dir);
+  //   assertEquals(1, status.length);
+  // }
 }

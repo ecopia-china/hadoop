@@ -40,4 +40,5 @@ public final class Constants {
   public static final String S3A_DEFAULT_URI = "s3a://ecopia-platform";
   public static final String S3_BUCKET_CONF = "fs.exfs.s3.bucket";
   public static final String S3_DEFAULT_BUCKET = "ecopia-platform";
+  public static final String PLATFORM_USERID = "fs.exfs.platform.user.id";
 }

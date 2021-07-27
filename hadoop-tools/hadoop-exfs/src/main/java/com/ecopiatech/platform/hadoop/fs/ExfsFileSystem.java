@@ -1,5 +1,6 @@
 package com.ecopiatech.platform.hadoop.fs;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.sun.jna.Library;
 import com.sun.jna.Native;
@@ -19,7 +20,6 @@ import org.apache.hadoop.util.Progressable;
 import java.io.*;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -77,6 +77,7 @@ public class ExfsFileSystem extends FileSystem {
   private Path workingDir;
   private String username;
   private String bucket;
+  private String userID;
 
   public static final Logger LOG = LoggerFactory.getLogger(ExfsFileSystem.class);
 
@@ -117,17 +118,18 @@ public class ExfsFileSystem extends FileSystem {
     file.deleteOnExit();
 
     try {
-      uri = new URI("exfs://655541751814");
+      uri = new URI(name.getScheme(), "", "", "");
     } catch (URISyntaxException e) {
       LOG.error("parse uri error: " + e);
     }
+    userID = conf.get(PLATFORM_USERID, "0");
     username = UserGroupInformation.getCurrentUser().getShortUserName();
-    workingDir = new Path("/data")
-        .makeQualified(this.uri, this.getWorkingDirectory());
-    LOG.debug("exfs working dir: {}, username: {}", workingDir, username);
+    workingDir = getHomeDirectory();
     bucket = conf.get(S3_BUCKET_CONF, S3_DEFAULT_BUCKET);
+    LOG.debug("exfs working dir: {}, username: {}", workingDir, username);
 
     try {
+      // Init libexfs
       libexfs = Native.load(file.getAbsolutePath(), LibExfs.class);
       if (libexfs == null) {
         throw new IOException("Exfs initialized failed for exfs://" + name);
@@ -141,6 +143,8 @@ public class ExfsFileSystem extends FileSystem {
       if (ret != 0) {
         throw new IOException("Exfs initialized failed for exfs://" + name);
       }
+
+      // Init s3fs and s3 output stream
       s3fs.initialize(URI.create(S3A_DEFAULT_URI), conf);
       blockOutputActiveBlocks = intOption(conf,
           FAST_UPLOAD_ACTIVE_BLOCKS, DEFAULT_FAST_UPLOAD_ACTIVE_BLOCKS, 1);
@@ -200,7 +204,7 @@ public class ExfsFileSystem extends FileSystem {
   @Override
   public URI getUri() {
     LOG.debug("Get uri: " + uri);
-    return s3fs.getUri();
+    return uri;
   }
 
   @Override
@@ -211,6 +215,7 @@ public class ExfsFileSystem extends FileSystem {
 
   @Override
   protected void checkPath(Path path) {
+    // Do nothing
   }
 
   /**
@@ -437,32 +442,6 @@ public class ExfsFileSystem extends FileSystem {
     return true;
   }
 
-  private Path toS3APath(URI s3uri) {
-    URI s3auri;
-    try {
-      s3auri = new URI(
-        "s3a", s3uri.getHost(), s3uri.getPath(), s3uri.getFragment()
-      );
-    } catch (URISyntaxException e) {
-      LOG.error("Parse uri error: " + e);
-      return null;
-    }
-    return new Path(s3auri);
-  }
-
-  private URI toS3URI(Path exfs) {
-    URI u = exfs.toUri();
-    URI s3uri = null;
-    try {
-      s3uri = new URI(
-          "s3", bucket + "/" +u.getHost(), u.getPath(), u.getFragment()
-      );
-    } catch (URISyntaxException e) {
-      LOG.error("parse uri error: " + e);
-    }
-    return s3uri;
-  }
-
   /**
    * List the statuses of the files/directories in the given path if the path is
    * a directory.
@@ -598,8 +577,45 @@ public class ExfsFileSystem extends FileSystem {
     }
   }
 
+  private Path toS3APath(URI s3uri) {
+    URI s3auri;
+    try {
+      s3auri = new URI(
+          "s3a", s3uri.getHost(), s3uri.getPath(), s3uri.getFragment()
+      );
+    } catch (URISyntaxException e) {
+      LOG.error("Parse uri error: " + e);
+      return null;
+    }
+    return new Path(s3auri);
+  }
+
+  private URI toS3URI(Path f) {
+    String key = toExfsPath(f);
+    URI s3uri;
+    try {
+      s3uri = new URI("s3", bucket, key, "");
+    } catch (URISyntaxException e) {
+      LOG.error("Parse uri error: " + e);
+      return null;
+    }
+    return s3uri;
+  }
+
   private String toExfsPath(Path p) {
-    URI uri = p.toUri();
-    return uri.getHost() + uri.getPath();
+    Path np;
+    if (p.isAbsolute()) {
+      String parent = getHomeDirectory().toUri().getPath();
+      String child = p.toUri().getPath();
+      np = new Path(getScheme() + ":///" + parent + child);
+    } else {
+      np = p.makeQualified(uri, workingDir);
+    }
+    return np.toUri().getPath();
+  }
+
+  @Override
+  public Path getHomeDirectory() {
+    return new Path(getScheme() + ":///" + userID + "/data");
   }
 }

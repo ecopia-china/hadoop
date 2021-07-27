@@ -50,7 +50,7 @@ public abstract class AbstractExfsMockTest {
 
   @Before
   public void setup() throws Exception {
-    fs = new ExfsFileSystemImpl();
+    fs = new ExfsFileSystem();
     Configuration conf = new Configuration();
     conf.set("fs.exfs.redis.url", "redis://192.168.33.1");
     URI uri = URI.create("exfs://655541751814");

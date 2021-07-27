@@ -12,7 +12,6 @@ import org.apache.hadoop.fs.s3a.*;
 import org.apache.hadoop.fs.s3a.commit.CommitConstants;
 import org.apache.hadoop.fs.s3a.commit.MagicCommitIntegration;
 import org.apache.hadoop.fs.s3a.commit.PutTracker;
-import org.apache.hadoop.fs.store.EtagChecksum;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.BlockingThreadPoolExecutorService;
 import org.apache.hadoop.util.Progressable;
@@ -22,7 +21,6 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.EnumSet;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -33,6 +31,7 @@ import org.slf4j.LoggerFactory;
 
 import static org.apache.hadoop.fs.s3a.Constants.*;
 import static com.ecopiatech.platform.hadoop.fs.ExfsUtils.*;
+import static com.ecopiatech.platform.hadoop.fs.Constants.*;
 
 public class ExfsFileSystem extends FileSystem {
   public ExfsFileSystem() {
@@ -77,6 +76,7 @@ public class ExfsFileSystem extends FileSystem {
   private URI uri;
   private Path workingDir;
   private String username;
+  private String bucket;
 
   public static final Logger LOG = LoggerFactory.getLogger(ExfsFileSystem.class);
 
@@ -98,8 +98,13 @@ public class ExfsFileSystem extends FileSystem {
    */
   public void initialize(URI name, Configuration conf)
       throws IOException {
-    LOG.debug("initalize exfs, uri: " + name);
-    InputStream is = ClassLoader.class.getResourceAsStream("/libexfs.so");
+    LOG.debug("Initalize exfs, uri: " + name);
+
+    super.initialize(name, conf);
+    setConf(conf);
+
+    // Load libexfs so library
+    InputStream is = ClassLoader.class.getResourceAsStream(LIBEXFS_SO_FILE);
     File file = File.createTempFile("lib", ".so");
     OutputStream os = new FileOutputStream(file);
     byte[] buffer = new byte[1024];
@@ -112,12 +117,23 @@ public class ExfsFileSystem extends FileSystem {
     file.deleteOnExit();
 
     try {
+      uri = new URI("exfs://655541751814");
+    } catch (URISyntaxException e) {
+      LOG.error("parse uri error: " + e);
+    }
+    username = UserGroupInformation.getCurrentUser().getShortUserName();
+    workingDir = new Path("/data")
+        .makeQualified(this.uri, this.getWorkingDirectory());
+    LOG.debug("exfs working dir: {}, username: {}", workingDir, username);
+    bucket = conf.get(S3_BUCKET_CONF, S3_DEFAULT_BUCKET);
+
+    try {
       libexfs = Native.load(file.getAbsolutePath(), LibExfs.class);
       if (libexfs == null) {
         throw new IOException("Exfs initialized failed for exfs://" + name);
       }
 
-      String redis_url = conf.get("fs.exfs.redis.url", "");
+      String redis_url = conf.get(REDIS_URL_CONF, "");
       if (redis_url.equals("")) {
         throw new IOException("fs.exfs.redis.url is required");
       }
@@ -125,10 +141,7 @@ public class ExfsFileSystem extends FileSystem {
       if (ret != 0) {
         throw new IOException("Exfs initialized failed for exfs://" + name);
       }
-      s3fs.initialize(URI.create("s3a://ecopia-platform"), conf);
-      uri = name;
-      workingDir = new Path("/");
-      username = UserGroupInformation.getCurrentUser().getShortUserName();
+      s3fs.initialize(URI.create(S3A_DEFAULT_URI), conf);
       blockOutputActiveBlocks = intOption(conf,
           FAST_UPLOAD_ACTIVE_BLOCKS, DEFAULT_FAST_UPLOAD_ACTIVE_BLOCKS, 1);
       instrumentation = new ExfsInstrumentation(name);
@@ -177,106 +190,8 @@ public class ExfsFileSystem extends FileSystem {
    */
   @Override
   public String getScheme() {
-    LOG.debug("get scheme");
+    LOG.debug("Get scheme");
     return "exfs";
-  }
-
-  /**
-   * Get the storage statistics of this filesystem.
-   * @return the storage statistics
-   */
-  @Override
-  public ExfsStorageStatistics getStorageStatistics() {
-    LOG.debug("get storage statistics");
-    return null;
-  }
-
-  /**
-   * Check that a Path belongs to this FileSystem.
-   * Unlike the superclass, this version does not look at authority,
-   * only hostnames.
-   * @param path to check
-   * @throws IllegalArgumentException if there is an FS mismatch
-   */
-  @Override
-  public void checkPath(Path path) {
-    LOG.debug("check path: " + path);
-  }
-
-  /**
-   * {@inheritDoc}
-   * @throws FileNotFoundException if the parent directory is not present -or
-   * is not a directory.
-   */
-  @Override
-  public FSDataOutputStream createNonRecursive(Path path,
-                                               FsPermission permission,
-                                               EnumSet<CreateFlag> flags,
-                                               int bufferSize,
-                                               short replication,
-                                               long blockSize,
-                                               Progressable progress) throws IOException {
-    LOG.debug("createNonRecursive: " + path);
-    return null;
-  }
-
-  /**
-   * @param f The file path
-   * @param length The length of the file range for checksum calculation
-   * @return The EtagChecksum or null if checksums are not enabled or supported.
-   * @throws IOException IO failure
-   * @see <a href="http://docs.aws.amazon.com/AmazonS3/latest/API/RESTCommonResponseHeaders.html">Common Response Headers</a>
-   */
-  @Override
-  @Retries.RetryTranslated
-  public EtagChecksum getFileChecksum(Path f, final long length)
-      throws IOException {
-    LOG.debug("get file checksum: " + f);
-    return null;
-  }
-
-  /**
-   * @param f a path
-   * @param recursive if the subdirectories need to be traversed recursively
-   *
-       * @return an iterator that traverses statuses of the files/directories
-   *         in the given path
-   * @throws FileNotFoundException if {@code path} does not exist
-   * @throws IOException if any I/O error occurred
-   */
-  @Override
-  @Retries.OnceTranslated
-  public RemoteIterator<LocatedFileStatus> listFiles(Path f, boolean recursive)
-      throws FileNotFoundException, IOException {
-    LOG.debug("list files: " + f);
-    return null;
-  }
-
-  /**
-   * Override superclass so as to add statistic collection.
-   * {@inheritDoc}
-   */
-  @Override
-  public RemoteIterator<LocatedFileStatus> listLocatedStatus(Path f)
-      throws IOException {
-    return listLocatedStatus(f, ACCEPT_ALL);
-  }
-
-  /**
-   * @param f a path
-   * @param filter a path filter
-   * @return an iterator that traverses statuses of the files/directories
-   *         in the given path
-   * @throws FileNotFoundException if {@code path} does not exist
-   * @throws IOException if any I/O error occurred
-   */
-  @Override
-  @Retries.OnceTranslated("s3guard not retrying")
-  public RemoteIterator<LocatedFileStatus> listLocatedStatus(
-      final Path f, final PathFilter filter)
-      throws FileNotFoundException, IOException {
-    LOG.debug("list located status: " + f);
-    return null;
   }
 
   /**
@@ -284,8 +199,18 @@ public class ExfsFileSystem extends FileSystem {
    */
   @Override
   public URI getUri() {
-    LOG.debug("get uri: " + uri);
-    return uri;
+    LOG.debug("Get uri: " + uri);
+    return s3fs.getUri();
+  }
+
+  @Override
+  public int getDefaultPort() {
+    LOG.debug("Get default port");
+    return s3fs.getDefaultPort();
+  }
+
+  @Override
+  protected void checkPath(Path path) {
   }
 
   /**
@@ -295,7 +220,7 @@ public class ExfsFileSystem extends FileSystem {
    */
   public FSDataInputStream open(Path f, int bufferSize)
       throws IOException {
-    LOG.debug("open file: " + f);
+    LOG.debug("Open file: " + f);
     ExfsFileStatus s = getFileStatusInternal(f);
     return s3fs.open(toS3APath(s.getDataPath()), bufferSize);
   }
@@ -321,7 +246,7 @@ public class ExfsFileSystem extends FileSystem {
   public FSDataOutputStream create(Path f, FsPermission permission,
                                    boolean overwrite, int bufferSize, short replication, long blockSize,
                                    Progressable progress) throws IOException {
-    LOG.debug("create file: " + f);
+    LOG.debug("Create file: " + f);
     boolean exists;
     ExfsFileStatus s = null;
     try {
@@ -411,7 +336,7 @@ public class ExfsFileSystem extends FileSystem {
    */
   public FSDataOutputStream append(Path f, int bufferSize, Progressable progress)
       throws IOException {
-    LOG.debug("append file: " + f);
+    LOG.debug("Append file: " + f);
     throw new UnsupportedOperationException("Append is not supported by ExfsFileSystem");
   }
 
@@ -425,7 +350,7 @@ public class ExfsFileSystem extends FileSystem {
    * @return true if rename is successful
    */
   public boolean rename(Path src, Path dst) throws IOException {
-    LOG.debug("rename file, from "+ src +" to " + dst);
+    LOG.debug("Rename file, from "+ src +" to " + dst);
     int ret = libexfs.MoveEntry(toExfsPath(src), toExfsPath(dst));
     if (ret != 0) {
       throw new IOException(Errno.toString(ret));
@@ -448,7 +373,7 @@ public class ExfsFileSystem extends FileSystem {
    */
   @Retries.RetryTranslated
   public boolean delete(Path f, boolean recursive) throws IOException {
-    LOG.debug("delete file: " + f);
+    LOG.debug("Delete file: " + f);
     ExfsFileStatus s;
     try {
       s = getFileStatusInternal(f);
@@ -478,23 +403,23 @@ public class ExfsFileSystem extends FileSystem {
 
   private boolean deleteRecursive(Path f) throws IOException {
     ExfsFileStatus[] ss = listStatusInternal(f);
-    LOG.debug("dir: " + f + " entry size: " + ss.length);
+    LOG.debug("Dir: " + f + " entry size: " + ss.length);
     for (ExfsFileStatus s : ss) {
       if (s.isDirectory()) {
-        LOG.debug("delete dir recursive: " + s.getPath());
+        LOG.debug("Delete dir recursive: " + s.getPath());
         deleteRecursive(s.getPath());
       } else {
-        LOG.debug("delete file: " + s.getPath());
+        LOG.debug("Delete file: " + s.getPath());
         int ret = libexfs.DeleteFile(toExfsPath(s.getPath()));
         if (ret != 0) {
           throw new IOException(Errno.toString(ret));
         }
         if (!deleteS3Object(s.getDataPath())) {
-          LOG.error("delete object error: " + s);
+          LOG.error("Delete object error: " + s);
         }
       }
     }
-    LOG.debug("delete dir: " + f);
+    LOG.debug("Delete dir: " + f);
     int ret = libexfs.DeleteDir(toExfsPath(f));
     if (ret != 0) {
       throw new IOException(Errno.toString(ret));
@@ -506,7 +431,7 @@ public class ExfsFileSystem extends FileSystem {
     try {
       s3fs.delete(toS3APath(s3uri), false);
     } catch (Exception e) {
-      LOG.error("delete s3 object error: " + e);
+      LOG.error("Delete s3 object error: " + e);
       return false;
     }
     return true;
@@ -519,7 +444,7 @@ public class ExfsFileSystem extends FileSystem {
         "s3a", s3uri.getHost(), s3uri.getPath(), s3uri.getFragment()
       );
     } catch (URISyntaxException e) {
-      LOG.error("parse uri error: " + e);
+      LOG.error("Parse uri error: " + e);
       return null;
     }
     return new Path(s3auri);
@@ -530,7 +455,7 @@ public class ExfsFileSystem extends FileSystem {
     URI s3uri = null;
     try {
       s3uri = new URI(
-          "s3", "ecopia-platform/"+u.getHost(), u.getPath(), u.getFragment()
+          "s3", bucket + "/" +u.getHost(), u.getPath(), u.getFragment()
       );
     } catch (URISyntaxException e) {
       LOG.error("parse uri error: " + e);
@@ -548,11 +473,17 @@ public class ExfsFileSystem extends FileSystem {
    *         IOException see specific implementation
    */
   public FileStatus[] listStatus(Path f) throws IOException {
-    return listStatusInternal(f);
+    ExfsFileStatus s = getFileStatusInternal(f);
+    if (s.isFile()) {
+      FileStatus[] res = {s};
+      return res;
+    } else {
+      return listStatusInternal(f);
+    }
   }
 
   public ExfsFileStatus[] listStatusInternal(Path f) throws IOException {
-    LOG.debug("list status: " + f);
+    LOG.debug("List status: " + f);
     Pointer ptr = null;
     try {
       ListDir_return.ByValue ret = libexfs.ListDir(toExfsPath(f), "");
@@ -562,15 +493,20 @@ public class ExfsFileSystem extends FileSystem {
       ptr = ret.r0;
       String j = ptr.getString(0, "utf8");
       List<Entry> entries = JSON.parseArray(j, Entry.class);
-      List<ExfsFileStatus> status = new ArrayList<>();
+      if (entries.size() < 2) {
+        throw new FileNotFoundException(f + " not found");
+      }
+      ExfsFileStatus[] output = new ExfsFileStatus[entries.size() - 2];
+      int entryIndex = 0;
       for (Entry e : entries) {
         if (e.name.equals(".") || e.name.equals("..")) {
           continue;
         }
-        status.add(new ExfsFileStatus(e.attr, new Path(f, e.name), username));
+        Path subPath = new Path(f, e.name);
+        output[entryIndex++] = new ExfsFileStatus(
+            e.attr, subPath, username, getDefaultBlockSize(subPath));
       }
-      ExfsFileStatus[] output = new ExfsFileStatus[status.size()];
-      return status.toArray(output);
+      return output;
     } finally {
       if (ptr != null) {
         Native.free(Pointer.nativeValue(ptr));
@@ -585,7 +521,7 @@ public class ExfsFileSystem extends FileSystem {
    * @param newDir the current working directory.
    */
   public void setWorkingDirectory(Path newDir) {
-    LOG.debug("set working dir: " + newDir);
+    LOG.debug("Set working dir: " + newDir);
     workingDir = newDir;
   }
 
@@ -594,7 +530,7 @@ public class ExfsFileSystem extends FileSystem {
    * @return the directory pathname
    */
   public Path getWorkingDirectory() {
-    LOG.debug("get working dir: " + workingDir);
+    LOG.debug("Get working dir: " + workingDir);
     return workingDir;
   }
 
@@ -610,7 +546,7 @@ public class ExfsFileSystem extends FileSystem {
    */
   public boolean mkdirs(Path path, FsPermission permission)
       throws IOException, FileAlreadyExistsException {
-    LOG.debug("mkdirs: " + path);
+    LOG.debug("Mkdirs: " + path);
     int ret = libexfs.CreateDirAll(toExfsPath(path), permission.toShort());
     if (ret == 17 /* EEXIST 17 File exists */) {
       throw new FileAlreadyExistsException(path + " already exist");
@@ -633,7 +569,7 @@ public class ExfsFileSystem extends FileSystem {
   }
 
   private ExfsFileStatus getFileStatusInternal(final Path f) throws IOException {
-    LOG.debug("get file status: " + f);
+    LOG.debug("Get file status: " + f);
     Pointer ptr0 = null;
     Pointer ptr1 = null;
     try {
@@ -649,8 +585,8 @@ public class ExfsFileSystem extends FileSystem {
       String j1 = ptr1.getString(0);
       Attr attr = JSON.parseObject(j, Attr.class);
       FileData data = JSON.parseObject(j1, FileData.class);
-      ExfsFileStatus s = new ExfsFileStatus(attr, data, f, username);
-      LOG.debug("get file status res: " + s + " attr: " + attr + " data: " + data);
+      ExfsFileStatus s = new ExfsFileStatus(attr, data, f, username, getDefaultBlockSize(f));
+      LOG.debug("Get file status res: " + s + " attr: " + attr + " data: " + data);
       return s;
     } finally {
       if (ptr0 != null) {

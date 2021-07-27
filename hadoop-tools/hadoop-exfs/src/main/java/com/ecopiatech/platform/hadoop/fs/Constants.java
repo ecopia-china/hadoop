@@ -18,27 +18,26 @@
 
 package com.ecopiatech.platform.hadoop.fs;
 
-import org.apache.hadoop.fs.FileStatus;
-import org.apache.hadoop.fs.Path;
-import org.junit.Test;
-import static org.junit.Assert.*;
+import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceStability;
 
 /**
- * S3A tests for getFileStatus using mock S3 client.
+ * All the constants used with the {@link ExfsFileSystem}.
+ *
+ * Some of the strings are marked as {@code Unstable}. This means
+ * that they may be unsupported in future; at which point they will be marked
+ * as deprecated and simply ignored.
  */
-public class TestExfs extends AbstractExfsMockTest {
+@InterfaceAudience.Public
+@InterfaceStability.Evolving
+public final class Constants {
 
-  @Test
-  public void testFileStat() throws Exception {
-    Path p = new Path("exfs://655541751814/data/file1");
-    FileStatus fileStatus = fs.getFileStatus(p);
-    assertTrue(fileStatus.isFile());
+  private Constants() {
   }
 
-  @Test
-  public void testListStatus() throws Exception {
-    Path dir = new Path("exfs://655541751814/data/general_address.csv");
-    FileStatus[] status = fs.listStatus(dir);
-    assertEquals(1, status.length);
-  }
+  public static final String LIBEXFS_SO_FILE = "/libexfs.so";
+  public static final String REDIS_URL_CONF = "fs.exfs.redis.url";
+  public static final String S3A_DEFAULT_URI = "s3a://ecopia-platform";
+  public static final String S3_BUCKET_CONF = "fs.exfs.s3.bucket";
+  public static final String S3_DEFAULT_BUCKET = "ecopia-platform";
 }

@@ -18,27 +18,30 @@
 
 package com.ecopiatech.platform.hadoop.fs;
 
-import org.apache.hadoop.fs.FileStatus;
-import org.apache.hadoop.fs.Path;
-import org.junit.Test;
-import static org.junit.Assert.*;
+import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.DelegateToFileSystem;
+
+import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
 
 /**
- * S3A tests for getFileStatus using mock S3 client.
+ * S3A implementation of AbstractFileSystem.
+ * This impl delegates to the S3AFileSystem
  */
-public class TestExfs extends AbstractExfsMockTest {
+@InterfaceAudience.Public
+@InterfaceStability.Evolving
+public class Exfs extends DelegateToFileSystem{
 
-  @Test
-  public void testFileStat() throws Exception {
-    Path p = new Path("exfs://655541751814/data/file1");
-    FileStatus fileStatus = fs.getFileStatus(p);
-    assertTrue(fileStatus.isFile());
+  public Exfs(URI theUri, Configuration conf)
+          throws IOException, URISyntaxException {
+    super(theUri, new ExfsFileSystem(), conf, "exfs", false);
   }
 
-  @Test
-  public void testListStatus() throws Exception {
-    Path dir = new Path("exfs://655541751814/data/general_address.csv");
-    FileStatus[] status = fs.listStatus(dir);
-    assertEquals(1, status.length);
+  @Override
+  public int getUriDefaultPort() {
+    return org.apache.hadoop.fs.s3a.Constants.S3A_DEFAULT_PORT;
   }
 }

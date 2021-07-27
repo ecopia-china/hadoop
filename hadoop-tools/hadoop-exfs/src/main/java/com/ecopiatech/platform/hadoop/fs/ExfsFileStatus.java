@@ -9,20 +9,20 @@ import java.net.URI;
 public class ExfsFileStatus extends FileStatus {
   private FileData data;
 
-  public ExfsFileStatus(Attr attr, Path p, String username) {
+  public ExfsFileStatus(Attr attr, Path p, String username, long blocksize) {
     super(attr.length, attr.type.equals(attr.TYPE_DIRECTORY),
-        attr.DEFAULT_REPLICAS, 0,
+        attr.DEFAULT_REPLICAS, blocksize,
         attr.modification_time(), attr.access_time(),
         new FsPermission(attr.mode),
-        username, username, p);
+        username, username, null, p, false, true, false);
   }
 
-  public ExfsFileStatus(Attr attr, FileData d, Path p, String username) {
+  public ExfsFileStatus(Attr attr, FileData d, Path p, String username, long blocksize) {
     super(attr.length, attr.type.equals(attr.TYPE_DIRECTORY),
-        attr.DEFAULT_REPLICAS, 0,
+        attr.DEFAULT_REPLICAS, blocksize,
         attr.modification_time(), attr.access_time(),
         new FsPermission(attr.mode),
-        username, username, p);
+        username, username, null, p, false, true, false);
     data = d;
   }
 
